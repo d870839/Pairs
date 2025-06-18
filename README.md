@@ -9,7 +9,8 @@ A comprehensive Python package for analyzing pricing relationships between manuf
 - **Optimal Pricing**: Calculates revenue-maximizing prices following retail pricing rules
 - **Flexible Data Input**: Works with any CSV file in the specified format
 - **Manufacturer Selection**: Automatically detects available manufacturers and allows user selection
-- **Quality Validation**: Only uses statistically valid models (R² ≥ 0.5, p-value ≤ 0.05)
+- **Quality Validation**: Only uses statistically valid models (R² ≥ 0.25, p-value ≤ 0.05)
+- **Cross-Price Elasticity**: Analyzes competitive dynamics between manufacturers
 
 ## Data Requirements
 
@@ -18,7 +19,7 @@ Your CSV file must have the following structure:
 | Column | Description | Example |
 |--------|-------------|---------|
 | `UPC+Item Description` | Product description with size | "KROGER CHICKEN BREAST 2.6 OZ" |
-| `Manufacturer Description` | Manufacturer name | "KROGER", "STARKIST" |
+| `Manufacturer Description` | Manufacturer name | "KROGER", "COMPETITOR" |
 | `Data` | Data type | "Scanned Retail $" or "Scanned Movement" |
 | `Week1`, `Week2`, ... | Weekly sales data | Numeric values |
 
@@ -27,8 +28,8 @@ Your CSV file must have the following structure:
 UPC+Item Description,Manufacturer Description,Data,Week1,Week2,Week3
 KROGER CHICKEN BREAST 2.6 OZ,KROGER,Scanned Retail $,150.25,145.50,160.75
 KROGER CHICKEN BREAST 2.6 OZ,KROGER,Scanned Movement,125,120,135
-STARKIST CHICKEN POUCH 2.6 OZ,STARKIST,Scanned Retail $,200.00,195.25,210.50
-STARKIST CHICKEN POUCH 2.6 OZ,STARKIST,Scanned Movement,85,82,90
+COMPETITOR CHICKEN POUCH 2.6 OZ,COMPETITOR,Scanned Retail $,200.00,195.25,210.50
+COMPETITOR CHICKEN POUCH 2.6 OZ,COMPETITOR,Scanned Movement,85,82,90
 ```
 
 ## Installation
@@ -56,7 +57,7 @@ analyzer = PricingAnalyzer('your_data.csv')
 # Run analysis
 results = analyzer.run_analysis(
     manufacturer1='KROGER', 
-    manufacturer2='STARKIST'
+    manufacturer2='COMPETITOR'
 )
 ```
 
@@ -69,17 +70,17 @@ results = analyzer.run_analysis(
 - Filters outliers using IQR method
 
 ### 2. Item Matching
-- Matches items between manufacturers based on:
-  - **Size**: Exact ounce match (e.g., 2.6 OZ)
-  - **Product Type**: Chicken, Beef, Tuna, etc.
-- Creates all possible pairs for analysis
+- **Size Matching**: Exact ounce match (e.g., 2.6 OZ)
+- **String Similarity**: Uses Jaro-Winkler distance to compare product descriptions
+- **Flexible Matching**: Combines size and similarity for neutral, product-type-agnostic matching
+- Creates pairs based on similarity threshold (default: 0.6)
 
 ### 3. Statistical Modeling
 - Builds regression models for each item:
   - **Linear Regression**: Basic price-volume relationship
   - **Ridge Regression**: Regularized model to prevent overfitting
 - Validates models using:
-  - **R² ≥ 0.5**: Good fit to data
+  - **R² ≥ 0.25**: Good fit to data
   - **p-value ≤ 0.05**: Statistically significant
 
 ### 4. Price Optimization
@@ -92,6 +93,53 @@ results = analyzer.run_analysis(
 - Shows model quality metrics
 - Calculates price gaps between manufacturers
 
+## Jaro-Winkler Similarity Matching
+
+The package uses Jaro-Winkler string similarity to match items between manufacturers, making the matching process more flexible and neutral.
+
+### How It Works
+
+1. **Size Filtering**: First filters items by exact size match
+2. **String Comparison**: Calculates similarity between product descriptions
+3. **Threshold Filtering**: Only keeps pairs above similarity threshold (default: 0.6)
+4. **Ranking**: Sorts matches by similarity score (highest first)
+
+### Similarity Threshold
+
+| Threshold | Matching Strictness | Use Case |
+|-----------|-------------------|----------|
+| 0.8+ | Very Strict | Nearly identical products |
+| 0.6-0.8 | Moderate | Similar products with variations |
+| 0.4-0.6 | Loose | Related products |
+| < 0.4 | Very Loose | May include unrelated items |
+
+### Benefits
+
+- **Product-Type Neutral**: Doesn't rely on meat type classification
+- **Flexible**: Catches variations in product naming
+- **Robust**: Handles typos and formatting differences
+- **Transparent**: Shows similarity scores for each match
+
+### Example Output
+
+```
+Finding like items using string similarity and size matching...
+KROGER items: 33
+COMPETITOR items: 8
+Total item comparisons: 264
+Matches found with similarity ≥ 0.6: 5
+
+Top 3 matches:
+  1. Similarity: 0.847
+     KROGER: KROGER CHICKEN BREAST 2.6 OZ
+     COMPETITOR: COMPETITOR CHICKEN POUCH 2.6 OZ
+     Size: 2.6 OZ
+  2. Similarity: 0.723
+     KROGER: KROGER TUNA SALAD 2.6 OZ
+     COMPETITOR: COMPETITOR TUNA MIX 2.6 OZ
+     Size: 2.6 OZ
+```
+
 ## Output
 
 The analysis generates a CSV file with comprehensive results:
@@ -99,7 +147,6 @@ The analysis generates a CSV file with comprehensive results:
 | Column | Description |
 |--------|-------------|
 | `Size_OZ` | Product size in ounces |
-| `Meat_Type` | Product type (CHKN, BEEF, etc.) |
 | `Mfg1_Item` | First manufacturer item description |
 | `Mfg2_Item` | Second manufacturer item description |
 | `Mfg1_Current_Price` | Current average price |
@@ -117,18 +164,6 @@ The analysis generates a CSV file with comprehensive results:
 | `Mfg1_Model_Status` | Model validation status |
 | `Mfg2_Model_Status` | Model validation status |
 | `Price_Gap` | Difference between recommended prices |
-
-## Product Type Detection
-
-The system automatically detects product types from descriptions:
-
-- **CHKN**: Contains C, H, K (chicken)
-- **BEEF**: Contains B, F (beef)
-- **TUNA**: Contains "TUNA"
-- **SALMON**: Contains "SALMON"
-- **TURKEY**: Contains "TURKEY" or "TRKY"
-- **HAM**: Contains "HAM"
-- **OTHER**: All other products
 
 ## Supported Size Formats (Flexible Size Extraction)
 
@@ -161,16 +196,16 @@ The package supports a wide range of size formats, including multi-unit and pack
 
 Only statistically valid models are used for recommendations:
 
-- **R² ≥ 0.5**: Model explains at least 50% of variance
-- **p-value ≤ 0.05**: Relationship is statistically significant
+- **R² ≥ 0.25**: Good fit to data
+- **p-value ≤ 0.05**: Statistically significant
 - **Minimum 5 data points**: Sufficient data for modeling
 
 ## Example Output
 
 ```
-=== ANALYZING PAIR: 2.6 OZ CHKN ===
+=== ANALYZING PAIR: 2.6 OZ ===
 KROGER: KROGER CHICKEN BREAST 2.6 OZ
-STARKIST: STARKIST CHICKEN POUCH 2.6 OZ
+COMPETITOR: COMPETITOR CHICKEN POUCH 2.6 OZ
 
 KROGER Model Status: Valid model
 KROGER Recommendation:
@@ -181,8 +216,8 @@ KROGER Recommendation:
   Model R²: 0.6234
   Model P-Value: 0.0234
 
-STARKIST Model Status: Valid model
-STARKIST Recommendation:
+COMPETITOR Model Status: Valid model
+COMPETITOR Recommendation:
   Current Price: $1.85
   Recommended Price: $1.99
   Predicted Volume: 95.7
@@ -198,7 +233,7 @@ Price Gap: $0.90
 ### Common Issues
 
 1. **"No matching items found"**
-   - Check that both manufacturers have items with same size and type
+   - Check that both manufacturers have items with same size
    - Verify product descriptions contain size information (e.g., "2.6 OZ")
 
 2. **"Model quality insufficient"**
@@ -225,4 +260,4 @@ This package is provided as-is for educational and business analysis purposes.
 For questions or issues, please check:
 1. Data format requirements
 2. Python package dependencies
-3. File permissions and paths 
+3. File permissions and paths

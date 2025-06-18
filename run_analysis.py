@@ -6,6 +6,9 @@ Pricing Analysis Runner
 This script runs the comprehensive pricing analysis package.
 Simply replace Data.csv with your data file and run this script.
 
+The analysis compares Kroger against any other manufacturer in your data.
+You'll be prompted to select which competitor to analyze.
+
 Usage:
     python run_analysis.py
 """
@@ -14,8 +17,8 @@ from pricing_analysis_package import PricingAnalyzer
 
 def main():
     print("=== PRICING ANALYSIS RUNNER ===")
-    print("This tool analyzes pricing relationships between manufacturers.")
-    print("Kroger will always be one manufacturer, you'll select the second.\n")
+    print("This tool analyzes pricing relationships between Kroger and any competitor.")
+    print("Kroger will always be one manufacturer, you'll select the competitor to analyze.\n")
     
     # Get data file name
     data_file = input("Enter your data file name (default: Data.csv): ").strip()
@@ -37,7 +40,7 @@ def main():
         print(f"Error loading data: {e}")
         return
     
-    # Get second manufacturer
+    # Get competitor manufacturer
     print("\nAvailable manufacturers:")
     for i, mfg in enumerate(manufacturers):
         if mfg.upper() != 'KROGER':
@@ -45,12 +48,12 @@ def main():
     
     while True:
         try:
-            choice = input(f"\nSelect second manufacturer (0-{len(manufacturers)-1}): ").strip()
+            choice = input(f"\nSelect competitor manufacturer to analyze (0-{len(manufacturers)-1}): ").strip()
             choice_idx = int(choice)
             if 0 <= choice_idx < len(manufacturers):
-                manufacturer2 = manufacturers[choice_idx]
-                if manufacturer2.upper() == 'KROGER':
-                    print("Kroger is already the first manufacturer. Please select a different one.")
+                competitor = manufacturers[choice_idx]
+                if competitor.upper() == 'KROGER':
+                    print("Kroger is already the first manufacturer. Please select a different competitor.")
                     continue
                 break
             else:
@@ -58,15 +61,15 @@ def main():
         except ValueError:
             print("Please enter a valid number.")
     
-    print(f"\nAnalyzing: KROGER vs {manufacturer2}")
+    print(f"\nAnalyzing: KROGER vs {competitor}")
     
     # Run analysis
     try:
-        results = analyzer.run_analysis(manufacturer1='KROGER', manufacturer2=manufacturer2)
+        results = analyzer.run_analysis(manufacturer1='KROGER', manufacturer2=competitor)
         
         if results is not None:
             print(f"\n✅ Analysis complete!")
-            print(f"Results saved to: Pricing_Analysis_KROGER_{manufacturer2}.csv")
+            print(f"Results saved to: Pricing_Analysis_KROGER_{competitor}.csv")
             print(f"Total item pairs analyzed: {len(results)}")
             
             # Show summary of valid recommendations
@@ -77,9 +80,9 @@ def main():
                 print(f"Valid recommendations: {len(valid_results)}")
                 print("\nSample recommendations:")
                 for _, row in valid_results.head(3).iterrows():
-                    print(f"  {row['Size_OZ']} OZ {row['Meat_Type']}: "
+                    print(f"  {row['Size_OZ']} OZ: "
                           f"Kroger ${row['Mfg1_Recommended_Price']:.2f} vs "
-                          f"{manufacturer2} ${row['Mfg2_Recommended_Price']:.2f}")
+                          f"{competitor} ${row['Mfg2_Recommended_Price']:.2f}")
             else:
                 print("No statistically valid recommendations found.")
         else:

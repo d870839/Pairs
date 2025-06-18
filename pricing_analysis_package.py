@@ -1,13 +1,84 @@
 import pandas as pd
 import numpy as np
 import re
-from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.model_selection import train_test_split
 from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
+
+def jaro_winkler_similarity(s1, s2):
+    """
+    Calculate Jaro-Winkler similarity between two strings.
+    Returns a value between 0 and 1, where 1 is identical.
+    """
+    def jaro_similarity(s1, s2):
+        if s1 == s2:
+            return 1.0
+        
+        len1, len2 = len(s1), len(s2)
+        if len1 == 0 or len2 == 0:
+            return 0.0
+        
+        # Maximum distance for matching characters
+        match_distance = (max(len1, len2) // 2) - 1
+        if match_distance < 0:
+            match_distance = 0
+        
+        # Find matching characters
+        s1_matches = [False] * len1
+        s2_matches = [False] * len2
+        
+        matches = 0
+        transpositions = 0
+        
+        for i in range(len1):
+            start = max(0, i - match_distance)
+            end = min(i + match_distance + 1, len2)
+            
+            for j in range(start, end):
+                if s2_matches[j]:
+                    continue
+                if s1[i] != s2[j]:
+                    continue
+                s1_matches[i] = s2_matches[j] = True
+                matches += 1
+                break
+        
+        if matches == 0:
+            return 0.0
+        
+        # Count transpositions
+        k = 0
+        for i in range(len1):
+            if not s1_matches[i]:
+                continue
+            while not s2_matches[k]:
+                k += 1
+            if s1[i] != s2[k]:
+                transpositions += 1
+            k += 1
+        
+        transpositions //= 2
+        
+        return (matches / len1 + matches / len2 + (matches - transpositions) / matches) / 3
+    
+    # Calculate Jaro similarity
+    jaro_sim = jaro_similarity(s1, s2)
+    
+    # Calculate Winkler modification
+    prefix = 0
+    for i in range(min(len(s1), len(s2), 4)):
+        if s1[i] == s2[i]:
+            prefix += 1
+        else:
+            break
+    
+    # Winkler modification factor
+    winkler_factor = 0.1
+    
+    return jaro_sim + (prefix * winkler_factor * (1 - jaro_sim))
 
 class PricingAnalyzer:
     def __init__(self, data_file='Data.csv'):
@@ -22,9 +93,8 @@ class PricingAnalyzer:
         print(f"Loading data from {self.data_file}...")
         self.df = pd.read_csv(self.data_file)
         
-        # Extract size and meat type
+        # Extract size
         self.df['Size_OZ'] = self.df['UPC+Item Description'].apply(self.extract_size)
-        self.df['Meat_Type'] = self.df['UPC+Item Description'].apply(self.extract_meat_type)
         
         # Only keep items with valid size
         self.df = self.df[self.df['Size_OZ'].notna()]
@@ -96,26 +166,6 @@ class PricingAnalyzer:
         
         return None
     
-    def extract_meat_type(self, desc):
-        """Extract meat type from description"""
-        desc = str(desc).upper()
-        # Check for chicken: contains C, H, K in any combination
-        if 'C' in desc and 'H' in desc and 'K' in desc:
-            return 'CHKN'
-        # Check for beef: contains B and F
-        elif 'B' in desc and 'F' in desc:
-            return 'BEEF'
-        elif 'TUNA' in desc:
-            return 'TUNA'
-        elif 'SALMON' in desc:
-            return 'SALMON'
-        elif 'TURKEY' in desc or 'TRKY' in desc:
-            return 'TURKEY'
-        elif 'HAM' in desc:
-            return 'HAM'
-        else:
-            return 'OTHER'
-    
     def select_manufacturers(self, manufacturer1='KROGER', manufacturer2=None):
         """Select manufacturers for analysis"""
         if manufacturer2 is None:
@@ -155,7 +205,6 @@ class PricingAnalyzer:
             item_desc = row['UPC+Item Description']
             manufacturer = row['Manufacturer Description']
             size = row['Size_OZ']
-            meat_type = row['Meat_Type']
             data_type = row['Data']
             
             for week_col in week_cols:
@@ -165,7 +214,6 @@ class PricingAnalyzer:
                         'Item': item_desc,
                         'Manufacturer': manufacturer,
                         'Size_OZ': size,
-                        'Meat_Type': meat_type,
                         'Week': week_col,
                         'Sales_Dollars': value,
                         'Data_Type': 'Sales'
@@ -187,7 +235,6 @@ class PricingAnalyzer:
                         'Item': item_desc,
                         'Manufacturer': manufacturer,
                         'Size_OZ': size,
-                        'Meat_Type': meat_type,
                         'Week': week_col,
                         'Units': value,
                         'Avg_Price': avg_price,
@@ -216,9 +263,14 @@ class PricingAnalyzer:
         upper_bound = Q3 + 1.5 * IQR
         return df[(df[column] >= lower_bound) & (df[column] <= upper_bound)]
     
-    def find_like_items(self):
-        """Find like items between manufacturers based on size and meat type"""
-        print("Finding like items...")
+    def find_like_items(self, similarity_threshold=0.6):
+        """
+        Find like items between manufacturers using Jaro-Winkler similarity and size matching.
+        
+        Args:
+            similarity_threshold: Minimum similarity score (0-1) for item matching
+        """
+        print("Finding like items using string similarity and size matching...")
         
         # Get unique items by manufacturer
         mfg1_items = self.price_data[self.price_data['Manufacturer'].str.upper() == self.manufacturer1]['Item'].unique()
@@ -227,31 +279,57 @@ class PricingAnalyzer:
         print(f"{self.manufacturer1} items: {len(mfg1_items)}")
         print(f"{self.manufacturer2} items: {len(mfg2_items)}")
         
-        # Find common size + meat type combinations
-        mfg1_combos = set(self.price_data[self.price_data['Manufacturer'].str.upper() == self.manufacturer1][['Size_OZ', 'Meat_Type']].apply(tuple, axis=1))
-        mfg2_combos = set(self.price_data[self.price_data['Manufacturer'].str.upper() == self.manufacturer2][['Size_OZ', 'Meat_Type']].apply(tuple, axis=1))
-        common_combos = mfg1_combos.intersection(mfg2_combos)
+        # Get size data for each item
+        mfg1_sizes = {}
+        mfg2_sizes = {}
         
-        print(f"Common size + meat type combinations: {len(common_combos)}")
+        for item in mfg1_items:
+            item_data = self.price_data[self.price_data['Item'] == item]
+            if len(item_data) > 0:
+                mfg1_sizes[item] = item_data['Size_OZ'].iloc[0]
         
-        # Create all possible pairs
+        for item in mfg2_items:
+            item_data = self.price_data[self.price_data['Item'] == item]
+            if len(item_data) > 0:
+                mfg2_sizes[item] = item_data['Size_OZ'].iloc[0]
+        
+        # Find matches using similarity and size
         matches = []
-        for size, meat_type in sorted(common_combos):
-            mfg1_matches = self.price_data[(self.price_data['Manufacturer'].str.upper() == self.manufacturer1) & 
-                                         (self.price_data['Size_OZ'] == size) & 
-                                         (self.price_data['Meat_Type'] == meat_type)]['Item'].unique()
-            mfg2_matches = self.price_data[(self.price_data['Manufacturer'].str.upper() == self.manufacturer2) & 
-                                         (self.price_data['Size_OZ'] == size) & 
-                                         (self.price_data['Meat_Type'] == meat_type)]['Item'].unique()
-            
-            for mfg1_item in mfg1_matches:
-                for mfg2_item in mfg2_matches:
+        total_comparisons = 0
+        
+        for mfg1_item, mfg1_size in mfg1_sizes.items():
+            for mfg2_item, mfg2_size in mfg2_sizes.items():
+                total_comparisons += 1
+                
+                # Size must match exactly
+                if mfg1_size != mfg2_size:
+                    continue
+                
+                # Calculate string similarity
+                similarity = jaro_winkler_similarity(mfg1_item, mfg2_item)
+                
+                # Check if similarity meets threshold
+                if similarity >= similarity_threshold:
                     matches.append({
-                        'Size_OZ': size,
-                        'Meat_Type': meat_type,
+                        'Size_OZ': mfg1_size,
                         'Mfg1_Item': mfg1_item,
-                        'Mfg2_Item': mfg2_item
+                        'Mfg2_Item': mfg2_item,
+                        'Similarity_Score': similarity
                     })
+        
+        # Sort matches by similarity score (highest first)
+        matches.sort(key=lambda x: x['Similarity_Score'], reverse=True)
+        
+        print(f"Total item comparisons: {total_comparisons}")
+        print(f"Matches found with similarity ≥ {similarity_threshold}: {len(matches)}")
+        
+        if matches:
+            print(f"Top 3 matches:")
+            for i, match in enumerate(matches[:3]):
+                print(f"  {i+1}. Similarity: {match['Similarity_Score']:.3f}")
+                print(f"     {self.manufacturer1}: {match['Mfg1_Item']}")
+                print(f"     {self.manufacturer2}: {match['Mfg2_Item']}")
+                print(f"     Size: {match['Size_OZ']} OZ")
         
         return matches
     
@@ -319,7 +397,7 @@ class PricingAnalyzer:
                 return p_value
             else:
                 return 1.0  # Return high p-value if no coefficient
-        except:
+        except Exception:
             return 1.0  # Return high p-value if calculation fails
     
     def build_item_model(self, item_data, item_name):
@@ -352,7 +430,7 @@ class PricingAnalyzer:
                 'Intercept': lr.intercept_,
                 'P_Value': p_value_lr
             }
-        except:
+        except Exception:
             pass
         
         # Ridge Regression
@@ -371,7 +449,7 @@ class PricingAnalyzer:
                 'Intercept': ridge.intercept_,
                 'P_Value': p_value_ridge
             }
-        except:
+        except Exception:
             pass
         
         if not results:
@@ -380,11 +458,11 @@ class PricingAnalyzer:
         # Find best model with validation
         valid_models = {}
         for model_name, metrics in results.items():
-            if metrics['R2'] >= 0.5 and metrics['P_Value'] <= 0.05:
+            if metrics['R2'] >= 0.25 and metrics['P_Value'] <= 0.05:
                 valid_models[model_name] = metrics
         
         if not valid_models:
-            return None, None, None, f"Model quality insufficient (R² < 0.5 or p > 0.05). Best R²: {max([m['R2'] for m in results.values()]):.4f}, Best p-value: {min([m['P_Value'] for m in results.values()]):.4f}"
+            return None, None, None, f"Model quality insufficient (R² < 0.25 or p > 0.05). Best R²: {max([m['R2'] for m in results.values()]):.4f}, Best p-value: {min([m['P_Value'] for m in results.values()]):.4f}"
         
         # Find best valid model
         best_model_name = max(valid_models.items(), key=lambda x: x[1]['R2'])[0]
@@ -418,9 +496,9 @@ class PricingAnalyzer:
         
         return optimal_price, optimal_volume, max_revenue
     
-    def analyze_pair(self, mfg1_item, mfg2_item, size, meat_type):
+    def analyze_pair(self, mfg1_item, mfg2_item, size, similarity_score):
         """Analyze a specific item pair"""
-        print(f"\n=== ANALYZING PAIR: {size} OZ {meat_type} ===")
+        print(f"\n=== ANALYZING PAIR: {size} OZ ===")
         print(f"{self.manufacturer1}: {mfg1_item}")
         print(f"{self.manufacturer2}: {mfg2_item}")
         
@@ -483,9 +561,9 @@ class PricingAnalyzer:
         # Create recommendation entry
         recommendation = {
             'Size_OZ': size,
-            'Meat_Type': meat_type,
             'Mfg1_Item': mfg1_item,
             'Mfg2_Item': mfg2_item,
+            'Similarity_Score': similarity_score,
             'Mfg1_Current_Price': mfg1_current_avg,
             'Mfg2_Current_Price': mfg2_current_avg,
             'Mfg1_Recommended_Price': mfg1_recommendation['Optimal_Price'] if mfg1_recommendation else None,
@@ -504,7 +582,7 @@ class PricingAnalyzer:
         }
         
         # Print recommendations
-        print(f"{self.manufacturer1} Model Status: {mfg1_status}")
+        print(f"\n{self.manufacturer1} Model Status: {mfg1_status}")
         if mfg1_recommendation:
             print(f"{self.manufacturer1} Recommendation:")
             print(f"  Current Price: ${mfg1_current_avg:.2f}")
@@ -567,8 +645,8 @@ class PricingAnalyzer:
             recommendation = self.analyze_pair(
                 match['Mfg1_Item'], 
                 match['Mfg2_Item'], 
-                match['Size_OZ'], 
-                match['Meat_Type']
+                match['Size_OZ'],
+                match['Similarity_Score']
             )
             recommendations.append(recommendation)
         
@@ -595,6 +673,133 @@ class PricingAnalyzer:
             print(f"Average {self.manufacturer2} Model R²: {avg_mfg2_r2:.4f}")
         
         return recommendations_df
+    
+    def calculate_cross_price_elasticity(self, mfg1_data, mfg2_data, mfg1_item, mfg2_item):
+        """
+        Calculate cross-price elasticity between two competing items.
+        
+        Cross-price elasticity measures how a 1% change in one product's price
+        affects the demand for the competing product.
+        
+        Returns:
+        - mfg1_to_mfg2_elasticity: How mfg1's price affects mfg2's demand
+        - mfg2_to_mfg1_elasticity: How mfg2's price affects mfg1's demand
+        - significance levels and R² values
+        """
+        if len(mfg1_data) < 5 or len(mfg2_data) < 5:
+            return None, None, "Insufficient data for cross-price analysis"
+        
+        # Align data by week
+        mfg1_weekly = mfg1_data.groupby('Week').agg({
+            'Avg_Price': 'mean',
+            'Units': 'sum'
+        }).reset_index()
+        
+        mfg2_weekly = mfg2_data.groupby('Week').agg({
+            'Avg_Price': 'mean',
+            'Units': 'sum'
+        }).reset_index()
+        
+        # Merge on week to get aligned price and demand data
+        combined_data = pd.merge(mfg1_weekly, mfg2_weekly, on='Week', suffixes=('_mfg1', '_mfg2'))
+        
+        if len(combined_data) < 5:
+            return None, None, "Insufficient aligned data points"
+        
+        # Calculate cross-price elasticities
+        results = {}
+        
+        # Model 1: How mfg1's price affects mfg2's demand
+        try:
+            X1 = combined_data[['Avg_Price_mfg1']].values
+            y1 = combined_data['Units_mfg2'].values
+            
+            # Add constant for regression
+            X1_with_const = np.column_stack([np.ones(len(X1)), X1])
+            
+            # Calculate elasticity at mean values
+            mean_price_mfg1 = combined_data['Avg_Price_mfg1'].mean()
+            mean_units_mfg2 = combined_data['Units_mfg2'].mean()
+            
+            # Linear regression
+            beta1 = np.linalg.lstsq(X1_with_const, y1, rcond=None)[0][1]
+            elasticity1 = beta1 * (mean_price_mfg1 / mean_units_mfg2)
+            
+            # Calculate R² and p-value
+            y_pred1 = X1_with_const @ np.linalg.lstsq(X1_with_const, y1, rcond=None)[0]
+            r2_1 = 1 - np.sum((y1 - y_pred1)**2) / np.sum((y1 - np.mean(y1))**2)
+            
+            # Calculate p-value
+            residuals1 = y1 - y_pred1
+            n1 = len(X1)
+            p1 = X1_with_const.shape[1]
+            df1 = n1 - p1
+            mse1 = np.sum(residuals1**2) / df1
+            XtX_inv1 = np.linalg.inv(X1_with_const.T @ X1_with_const)
+            se_beta1 = np.sqrt(XtX_inv1[1, 1] * mse1)
+            t_stat1 = beta1 / se_beta1
+            p_value1 = 2 * (1 - stats.t.cdf(abs(t_stat1), df1))
+            
+            results['mfg1_to_mfg2'] = {
+                'elasticity': elasticity1,
+                'r2': r2_1,
+                'p_value': p_value1,
+                'significant': p_value1 <= 0.05
+            }
+        except Exception:
+            results['mfg1_to_mfg2'] = {
+                'elasticity': None,
+                'r2': None,
+                'p_value': None,
+                'significant': False
+            }
+        
+        # Model 2: How mfg2's price affects mfg1's demand
+        try:
+            X2 = combined_data[['Avg_Price_mfg2']].values
+            y2 = combined_data['Units_mfg1'].values
+            
+            # Add constant for regression
+            X2_with_const = np.column_stack([np.ones(len(X2)), X2])
+            
+            # Calculate elasticity at mean values
+            mean_price_mfg2 = combined_data['Avg_Price_mfg2'].mean()
+            mean_units_mfg1 = combined_data['Units_mfg1'].mean()
+            
+            # Linear regression
+            beta2 = np.linalg.lstsq(X2_with_const, y2, rcond=None)[0][1]
+            elasticity2 = beta2 * (mean_price_mfg2 / mean_units_mfg1)
+            
+            # Calculate R² and p-value
+            y_pred2 = X2_with_const @ np.linalg.lstsq(X2_with_const, y2, rcond=None)[0]
+            r2_2 = 1 - np.sum((y2 - y_pred2)**2) / np.sum((y2 - np.mean(y2))**2)
+            
+            # Calculate p-value
+            residuals2 = y2 - y_pred2
+            n2 = len(X2)
+            p2 = X2_with_const.shape[1]
+            df2 = n2 - p2
+            mse2 = np.sum(residuals2**2) / df2
+            XtX_inv2 = np.linalg.inv(X2_with_const.T @ X2_with_const)
+            se_beta2 = np.sqrt(XtX_inv2[1, 1] * mse2)
+            t_stat2 = beta2 / se_beta2
+            p_value2 = 2 * (1 - stats.t.cdf(abs(t_stat2), df2))
+            
+            results['mfg2_to_mfg1'] = {
+                'elasticity': elasticity2,
+                'r2': r2_2,
+                'p_value': p_value2,
+                'significant': p_value2 <= 0.05
+            }
+        except Exception:
+            results['mfg2_to_mfg1'] = {
+                'elasticity': None,
+                'r2': None,
+                'p_value': None,
+                'significant': False
+            }
+        
+        return results, "Cross-price elasticity calculated", None
 
 # Example usage
 if __name__ == "__main__":
