@@ -107,59 +107,60 @@ class PricingAnalyzer:
     
     def extract_size(self, desc):
         """
-        Extract total size (OZ) from description, handling multi-unit packages.
+        Extract total size (OZ/FO) from description, handling multi-unit packages.
         
         Handles various formats:
-        - Simple: '2.6 OZ' -> 2.6
+        - Simple: '2.6 OZ' or '16 FO' -> 2.6 or 16.0
         - Multi-unit: '6CT 6/3 OZ' -> 18.0 (6 * 3)
         - Fractional: '4/4.5 OZ' -> 18.0 (4 * 4.5)
         - Pack notation: '3PK 3/10 OZ' -> 30.0 (3 * 10)
         - Pack notation: '4 PACK 4/5 OZ' -> 20.0 (4 * 5)
+        - Fluid ounces: '4/16 FO' -> 64.0 (4 * 16)
         """
         desc = str(desc).upper()
         
-        # Pattern 1: Multi-unit with CT (count) like "6CT 6/3 OZ" or "10CT 10/1 OZ"
-        ct_pattern = re.compile(r'(\d+)CT\s+(\d+)/(\d+(?:\.\d+)?)\s*OZ', re.IGNORECASE)
+        # Pattern 1: Multi-unit with CT (count) like "6CT 6/3 OZ" or "10CT 10/1 FO"
+        ct_pattern = re.compile(r'(\d+)CT\s+(\d+)/(\d+(?:\.\d+)?)\s*(OZ|FO)', re.IGNORECASE)
         ct_match = ct_pattern.search(desc)
         if ct_match:
             units = int(ct_match.group(2))
             size_per_unit = float(ct_match.group(3))
             return units * size_per_unit
         
-        # Pattern 2: Multi-unit with PK (pack) like "3PK 3/10 OZ"
-        pk_pattern = re.compile(r'(\d+)PK\s+(\d+)/(\d+(?:\.\d+)?)\s*OZ', re.IGNORECASE)
+        # Pattern 2: Multi-unit with PK (pack) like "3PK 3/10 OZ" or "4PK 4/16 FO"
+        pk_pattern = re.compile(r'(\d+)PK\s+(\d+)/(\d+(?:\.\d+)?)\s*(OZ|FO)', re.IGNORECASE)
         pk_match = pk_pattern.search(desc)
         if pk_match:
             units = int(pk_match.group(2))
             size_per_unit = float(pk_match.group(3))
             return units * size_per_unit
         
-        # Pattern 3: Multi-unit with PACK like "4 PACK 4/5 OZ"
-        pack_pattern = re.compile(r'(\d+)\s+PACK\s+(\d+)/(\d+(?:\.\d+)?)\s*OZ', re.IGNORECASE)
+        # Pattern 3: Multi-unit with PACK like "4 PACK 4/5 OZ" or "4 PACK 4/16 FO"
+        pack_pattern = re.compile(r'(\d+)\s+PACK\s+(\d+)/(\d+(?:\.\d+)?)\s*(OZ|FO)', re.IGNORECASE)
         pack_match = pack_pattern.search(desc)
         if pack_match:
             units = int(pack_match.group(2))
             size_per_unit = float(pack_match.group(3))
             return units * size_per_unit
         
-        # Pattern 4: Simple fraction like "4/4.5 OZ" (assumes 1 pack)
-        fraction_pattern = re.compile(r'(\d+)/(\d+(?:\.\d+)?)\s*OZ', re.IGNORECASE)
+        # Pattern 4: Simple fraction like "4/4.5 OZ" or "4/16 FO" (assumes 1 pack)
+        fraction_pattern = re.compile(r'(\d+)/(\d+(?:\.\d+)?)\s*(OZ|FO)', re.IGNORECASE)
         fraction_match = fraction_pattern.search(desc)
         if fraction_match:
             units = int(fraction_match.group(1))
             size_per_unit = float(fraction_match.group(2))
             return units * size_per_unit
         
-        # Pattern 5: Multi-unit without explicit pack notation like "6 3 OZ"
-        multi_pattern = re.compile(r'(\d+)\s+(\d+(?:\.\d+)?)\s*OZ', re.IGNORECASE)
+        # Pattern 5: Multi-unit without explicit pack notation like "6 3 OZ" or "6 16 FO"
+        multi_pattern = re.compile(r'(\d+)\s+(\d+(?:\.\d+)?)\s*(OZ|FO)', re.IGNORECASE)
         multi_match = multi_pattern.search(desc)
         if multi_match:
             units = int(multi_match.group(1))
             size_per_unit = float(multi_match.group(2))
             return units * size_per_unit
         
-        # Pattern 6: Simple size like "2.6 OZ" (fallback)
-        simple_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*OZ', re.IGNORECASE)
+        # Pattern 6: Simple size like "2.6 OZ" or "16 FO" (fallback)
+        simple_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*(OZ|FO)', re.IGNORECASE)
         simple_match = simple_pattern.search(desc)
         if simple_match:
             return float(simple_match.group(1))
@@ -170,9 +171,10 @@ class PricingAnalyzer:
         """Select manufacturers for analysis"""
         if manufacturer2 is None:
             print(f"Please select the second manufacturer from: {self.manufacturers}")
-            for i, mfg in enumerate(self.manufacturers):
-                if mfg.upper() != manufacturer1.upper():
-                    print(f"  {i}: {mfg}")
+            available_competitors = [mfg for mfg in self.manufacturers if mfg.upper() != manufacturer1.upper()]
+            for i, mfg in enumerate(available_competitors):
+                print(f"  {i}: {mfg}")
+            print(f"\nNote: {len(self.manufacturers)} manufacturers have items with valid sizes.")
             return manufacturer1, None
         
         return manufacturer1.upper(), manufacturer2.upper()
@@ -414,7 +416,7 @@ class PricingAnalyzer:
         models = {}
         results = {}
         
-        # Linear Regression
+        # 1. Linear Regression
         try:
             lr = LinearRegression()
             lr.fit(X_train, y_train)
@@ -428,12 +430,13 @@ class PricingAnalyzer:
                 'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_lr)),
                 'Coefficient': lr.coef_[0],
                 'Intercept': lr.intercept_,
-                'P_Value': p_value_lr
+                'P_Value': p_value_lr,
+                'Type': 'Linear'
             }
         except Exception:
             pass
         
-        # Ridge Regression
+        # 2. Ridge Regression
         try:
             ridge = Ridge(alpha=1.0)
             ridge.fit(X_train, y_train)
@@ -447,7 +450,112 @@ class PricingAnalyzer:
                 'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_ridge)),
                 'Coefficient': ridge.coef_[0],
                 'Intercept': ridge.intercept_,
-                'P_Value': p_value_ridge
+                'P_Value': p_value_ridge,
+                'Type': 'Linear'
+            }
+        except Exception:
+            pass
+        
+        # 3. Log-Linear Model (log of units vs price)
+        try:
+            # Ensure positive values for log transformation
+            y_train_log = np.log(np.maximum(y_train, 0.1))
+            y_test_log = np.log(np.maximum(y_test, 0.1))
+            
+            lr_log = LinearRegression()
+            lr_log.fit(X_train, y_train_log)
+            y_pred_log = lr_log.predict(X_test)
+            
+            # Convert back to original scale for R² calculation
+            y_pred_original = np.exp(y_pred_log)
+            r2_log = r2_score(y_test, y_pred_original)
+            p_value_log = self.calculate_p_value(X_train, y_train_log, lr_log)
+            
+            models['Log_Linear'] = lr_log
+            results['Log_Linear'] = {
+                'R2': r2_log,
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_original)),
+                'Coefficient': lr_log.coef_[0],
+                'Intercept': lr_log.intercept_,
+                'P_Value': p_value_log,
+                'Type': 'Log_Linear'
+            }
+        except Exception:
+            pass
+        
+        # 4. Polynomial Model (Quadratic)
+        try:
+            # Create polynomial features
+            X_train_poly = np.column_stack([X_train, X_train**2])
+            X_test_poly = np.column_stack([X_test, X_test**2])
+            
+            poly_model = LinearRegression()
+            poly_model.fit(X_train_poly, y_train)
+            y_pred_poly = poly_model.predict(X_test_poly)
+            r2_poly = r2_score(y_test, y_pred_poly)
+            p_value_poly = self.calculate_p_value(X_train_poly, y_train, poly_model)
+            
+            models['Polynomial'] = poly_model
+            results['Polynomial'] = {
+                'R2': r2_poly,
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_poly)),
+                'Coefficient': poly_model.coef_[0],
+                'Intercept': poly_model.intercept_,
+                'P_Value': p_value_poly,
+                'Type': 'Polynomial'
+            }
+        except Exception:
+            pass
+        
+        # 5. Exponential Model (log of price vs units)
+        try:
+            # Ensure positive prices for log transformation
+            X_train_log = np.log(np.maximum(X_train, 0.1))
+            X_test_log = np.log(np.maximum(X_test, 0.1))
+            
+            exp_model = LinearRegression()
+            exp_model.fit(X_train_log, y_train)
+            y_pred_exp = exp_model.predict(X_test_log)
+            r2_exp = r2_score(y_test, y_pred_exp)
+            p_value_exp = self.calculate_p_value(X_train_log, y_train, exp_model)
+            
+            models['Exponential'] = exp_model
+            results['Exponential'] = {
+                'R2': r2_exp,
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_exp)),
+                'Coefficient': exp_model.coef_[0],
+                'Intercept': exp_model.intercept_,
+                'P_Value': p_value_exp,
+                'Type': 'Exponential'
+            }
+        except Exception:
+            pass
+        
+        # 6. Power Model (log-log transformation)
+        try:
+            # Ensure positive values for log transformation
+            X_train_log = np.log(np.maximum(X_train, 0.1))
+            X_test_log = np.log(np.maximum(X_test, 0.1))
+            y_train_log = np.log(np.maximum(y_train, 0.1))
+            y_test_log = np.log(np.maximum(y_test, 0.1))
+            
+            power_model = LinearRegression()
+            power_model.fit(X_train_log, y_train_log)
+            y_pred_log_power = power_model.predict(X_test_log)
+            
+            # Convert back to original scale for R² calculation
+            y_pred_power = np.exp(y_pred_log_power)
+            r2_power = r2_score(y_test, y_pred_power)
+            p_value_power = self.calculate_p_value(X_train_log, y_train_log, power_model)
+            
+            models['Power'] = power_model
+            results['Power'] = {
+                'R2': r2_power,
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_power)),
+                'Coefficient': power_model.coef_[0],
+                'Intercept': power_model.intercept_,
+                'P_Value': p_value_power,
+                'Type': 'Power'
             }
         except Exception:
             pass
@@ -464,12 +572,12 @@ class PricingAnalyzer:
         if not valid_models:
             return None, None, None, f"Model quality insufficient (R² < 0.25 or p > 0.05). Best R²: {max([m['R2'] for m in results.values()]):.4f}, Best p-value: {min([m['P_Value'] for m in results.values()]):.4f}"
         
-        # Find best valid model
+        # Find best valid model (highest R²)
         best_model_name = max(valid_models.items(), key=lambda x: x[1]['R2'])[0]
         best_model = models[best_model_name]
         best_results = valid_models[best_model_name]
         
-        return best_model, best_results, best_model_name, "Valid model"
+        return best_model, best_results, best_model_name, f"Valid {best_results['Type']} model"
     
     def predict_optimal_price(self, model, model_name, price_range, item_name):
         """Predict optimal price for revenue maximization"""
@@ -477,7 +585,34 @@ class PricingAnalyzer:
         
         for price in price_range:
             try:
-                pred = model.predict([[price]])[0]
+                if model_name == 'Linear' or model_name == 'Ridge':
+                    # Standard linear prediction
+                    pred = model.predict([[price]])[0]
+                
+                elif model_name == 'Log_Linear':
+                    # Log-linear: predict log(units), then convert back
+                    log_pred = model.predict([[price]])[0]
+                    pred = np.exp(log_pred)
+                
+                elif model_name == 'Polynomial':
+                    # Polynomial: include quadratic term
+                    pred = model.predict([[price, price**2]])[0]
+                
+                elif model_name == 'Exponential':
+                    # Exponential: log of price
+                    log_price = np.log(max(price, 0.1))
+                    pred = model.predict([[log_price]])[0]
+                
+                elif model_name == 'Power':
+                    # Power: log-log transformation
+                    log_price = np.log(max(price, 0.1))
+                    log_pred = model.predict([[log_price]])[0]
+                    pred = np.exp(log_pred)
+                
+                else:
+                    # Fallback to linear
+                    pred = model.predict([[price]])[0]
+                
                 predictions.append(max(0, pred))
             except:
                 predictions.append(0)
