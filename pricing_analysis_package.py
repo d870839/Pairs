@@ -6,6 +6,9 @@ from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.model_selection import train_test_split
 from scipy import stats
 import warnings
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import Pipeline
+import os
 warnings.filterwarnings('ignore')
 
 def jaro_winkler_similarity(s1, s2):
@@ -80,30 +83,53 @@ def jaro_winkler_similarity(s1, s2):
     
     return jaro_sim + (prefix * winkler_factor * (1 - jaro_sim))
 
-class PricingAnalyzer:
-    def __init__(self, data_file='Data.csv'):
-        """Initialize the pricing analyzer with a data file"""
-        self.data_file = data_file
+class PricingAnalysis:
+    """
+    A class for analyzing pricing relationships between manufacturers.
+    Supports finding like items, analyzing price elasticity, and generating recommendations.
+    """
+    def __init__(self):
+        """Initialize the pricing analyzer"""
         self.df = None
         self.price_data = None
-        self.manufacturers = []
+        self.manufacturer1 = None
+        self.manufacturer2 = None
         
-    def load_data(self):
-        """Load and prepare the data"""
-        print(f"Loading data from {self.data_file}...")
-        self.df = pd.read_csv(self.data_file)
-        
-        # Extract size
-        self.df['Size_OZ'] = self.df['UPC+Item Description'].apply(self.extract_size)
-        
-        # Only keep items with valid size
-        self.df = self.df[self.df['Size_OZ'].notna()]
-        
-        # Get available manufacturers
-        self.manufacturers = sorted(self.df['Manufacturer Description'].unique())
-        print(f"Available manufacturers: {self.manufacturers}")
-        
-        return self.manufacturers
+    def load_data(self, filename=None):
+        """Load and prepare the data for analysis"""
+        if filename is None:
+            filename = self.select_data_file()
+            if filename is None:
+                return
+                
+        print(f"Loading data from {filename}...")
+        try:
+            self.df = pd.read_csv(filename)
+            
+            # Create consolidated item name based on RBP grouping
+            def create_item_name(row):
+                rbp_code = row['Rules Based Pricing Code']
+                rbp_desc = str(row['Rules Based Pricing Description']).strip()
+                upc_desc = str(row['UPC+Item Description']).strip()
+                
+                # If RBP Code is null/empty/NaN, use UPC+Item Description
+                # Otherwise, use RBP Description
+                if pd.isna(rbp_code) or str(rbp_code).strip() == '' or str(rbp_code).strip().lower() == 'nan':
+                    return upc_desc
+                else:
+                    return rbp_desc
+            
+            # Create consolidated item name
+            self.df['Consolidated_Item'] = self.df.apply(create_item_name, axis=1)
+            
+            # Extract size information
+            self.df['Size_OZ'] = self.df['UPC+Item Description'].apply(self.extract_size)
+            
+            print(f"Data loaded: {len(self.df)} rows")
+            
+        except Exception as e:
+            print(f"Error loading data: {str(e)}")
+            return None
     
     def extract_size(self, desc):
         """
@@ -167,94 +193,177 @@ class PricingAnalyzer:
         
         return None
     
-    def select_manufacturers(self, manufacturer1='KROGER', manufacturer2=None):
-        """Select manufacturers for analysis"""
-        if manufacturer2 is None:
-            print(f"Please select the second manufacturer from: {self.manufacturers}")
-            available_competitors = [mfg for mfg in self.manufacturers if mfg.upper() != manufacturer1.upper()]
-            for i, mfg in enumerate(available_competitors):
-                print(f"  {i}: {mfg}")
-            print(f"\nNote: {len(self.manufacturers)} manufacturers have items with valid sizes.")
-            return manufacturer1, None
+    def select_manufacturers(self, manufacturer1=None, manufacturer2=None):
+        """Let user select manufacturers to compare"""
+        # Get unique manufacturers
+        available_manufacturers = sorted(self.df['Manufacturer Description'].unique())
+        print("\nAvailable manufacturers:", available_manufacturers)
         
-        return manufacturer1.upper(), manufacturer2.upper()
-    
-    def prepare_weekly_data(self, manufacturer1, manufacturer2):
-        """Prepare weekly data for analysis"""
-        print("Preparing weekly data...")
-        
-        # Filter for selected manufacturers
-        filtered_df = self.df[self.df['Manufacturer Description'].str.upper().isin([manufacturer1, manufacturer2])]
-        
-        # Identify week/date columns
-        week_cols = filtered_df.columns.tolist()
-        week_start = week_cols.index('Data') + 1
-        week_cols = week_cols[week_start:]
-        
-        # Clean numeric data
-        def clean_numeric(x):
-            try:
-                return float(str(x).replace('$', '').replace(',', '').replace('nan', '0'))
-            except Exception:
-                return 0.0
-        
-        for col in week_cols:
-            filtered_df[col] = filtered_df[col].apply(clean_numeric)
-        
-        # Create weekly data for analysis
-        weekly_data = []
-        for _, row in filtered_df.iterrows():
-            item_desc = row['UPC+Item Description']
-            manufacturer = row['Manufacturer Description']
-            size = row['Size_OZ']
-            data_type = row['Data']
-            
-            for week_col in week_cols:
-                value = row[week_col]
-                if data_type == 'Scanned Retail $':
-                    weekly_data.append({
-                        'Item': item_desc,
-                        'Manufacturer': manufacturer,
-                        'Size_OZ': size,
-                        'Week': week_col,
-                        'Sales_Dollars': value,
-                        'Data_Type': 'Sales'
-                    })
-                elif data_type == 'Scanned Movement':
-                    # Find corresponding sales row
-                    sales_row = filtered_df[(filtered_df['UPC+Item Description'] == item_desc) & 
-                                          (filtered_df['Data'] == 'Scanned Retail $')]
-                    if not sales_row.empty:
-                        sales_value = sales_row[week_col].iloc[0]
-                        if value > 0:  # Avoid division by zero
-                            avg_price = sales_value / value
-                        else:
-                            avg_price = 0
-                    else:
-                        avg_price = 0
+        # Select first manufacturer if not provided
+        if manufacturer1 is None:
+            print("\nSelect first manufacturer:")
+            for i, mfg in enumerate(available_manufacturers, 1):
+                print(f"{i}. {mfg}")
+                
+            while True:
+                try:
+                    choice = input("Enter manufacturer number (or press Enter for KROGER): ").strip()
+                    if not choice:  # Default to KROGER
+                        manufacturer1 = 'KROGER'
+                        break
                         
-                    weekly_data.append({
-                        'Item': item_desc,
-                        'Manufacturer': manufacturer,
-                        'Size_OZ': size,
-                        'Week': week_col,
-                        'Units': value,
-                        'Avg_Price': avg_price,
-                        'Data_Type': 'Movement'
-                    })
+                    choice = int(choice)
+                    if 1 <= choice <= len(available_manufacturers):
+                        manufacturer1 = available_manufacturers[choice - 1]
+                        break
+                    else:
+                        print("Invalid selection. Please try again.")
+                except ValueError:
+                    print("Please enter a valid number.")
         
+        # Select second manufacturer if not provided
+        if manufacturer2 is None:
+            print(f"\nSelect competitor to compare with {manufacturer1}:")
+            for i, mfg in enumerate(available_manufacturers, 1):
+                if mfg != manufacturer1:  # Don't show first manufacturer
+                    print(f"{i}. {mfg}")
+                    
+            while True:
+                try:
+                    choice = input("Enter manufacturer number: ").strip()
+                    choice = int(choice)
+                    if 1 <= choice <= len(available_manufacturers):
+                        manufacturer2 = available_manufacturers[choice - 1]
+                        if manufacturer2 != manufacturer1:
+                            break
+                        else:
+                            print("Cannot compare manufacturer with itself. Please select a different one.")
+                    else:
+                        print("Invalid selection. Please try again.")
+                except ValueError:
+                    print("Please enter a valid number.")
+        
+        return manufacturer1, manufacturer2
+    
+    def filter_discontinued_items(self, df, weeks_to_check=12, threshold_percent=10):
+        """
+        Filter out items that appear to be discontinued or significantly underperforming.
+        
+        Args:
+            df: DataFrame containing weekly sales data
+            weeks_to_check: Number of most recent weeks to check for activity
+            threshold_percent: Items with recent sales below this percent of median will be filtered out
+            
+        Returns:
+            DataFrame with only active items
+        """
+        # Get all week columns
+        week_pattern = re.compile(r'^\\d{4}\\s+PD\\s+\\d{2}\\s+WK\\s+\\d+\\s+\\(\\d{2}\\)$')
+        week_cols = [col for col in df.columns if week_pattern.match(col)]
+        
+        # Sort week columns to get most recent weeks
+        week_cols.sort(reverse=True)
+        recent_weeks = week_cols[:weeks_to_check]
+        
+        # Calculate median sales by manufacturer (excluding zeros)
+        manufacturer_medians = {}
+        for manufacturer in df['Manufacturer Description'].unique():
+            mfg_data = df[df['Manufacturer Description'] == manufacturer]
+            all_sales = []
+            for week in week_cols:
+                sales = pd.to_numeric(mfg_data[week].str.replace(',', ''), errors='coerce')
+                all_sales.extend(sales[sales > 0])  # Only include non-zero sales
+            if all_sales:
+                manufacturer_medians[manufacturer] = np.median(all_sales)
+            else:
+                manufacturer_medians[manufacturer] = 0
+        
+        # For each item, check recent sales against manufacturer median
+        active_items = []
+        for item in df['UPC+Item Description'].unique():
+            item_data = df[df['UPC+Item Description'] == item]
+            manufacturer = item_data['Manufacturer Description'].iloc[0]
+            mfg_median = manufacturer_medians[manufacturer]
+            
+            if mfg_median == 0:
+                continue
+                
+            # Calculate average recent sales
+            recent_sales = []
+            for week in recent_weeks:
+                sales = pd.to_numeric(item_data[week].str.replace(',', ''), errors='coerce')
+                if not sales.empty:
+                    recent_sales.append(sales.iloc[0])
+            
+            avg_recent_sales = np.mean(recent_sales) if recent_sales else 0
+            
+            # If average recent sales are above threshold, keep the item
+            if avg_recent_sales >= (mfg_median * threshold_percent / 100):
+                active_items.append(item)
+        
+        # Filter dataframe to keep only active items
+        active_df = df[df['UPC+Item Description'].isin(active_items)]
+        
+        # Print removal statistics
+        removed_count = len(df['UPC+Item Description'].unique()) - len(active_df['UPC+Item Description'].unique())
+        print(f"Removed {removed_count} items (sales below {threshold_percent}% of manufacturer median in last {weeks_to_check} weeks)")
+        print(f"Data points after filtering: {len(active_df)}")
+        
+        return active_df
+
+    def prepare_weekly_data(self, manufacturer1, manufacturer2):
+        """
+        Prepare weekly data for analysis.
+        
+        Args:
+            manufacturer1: First manufacturer to compare
+            manufacturer2: Second manufacturer to compare
+            
+        Returns:
+            DataFrame with weekly data for both manufacturers
+        """
+        # Filter for selected manufacturers
+        filtered_df = self.df[
+            (self.df['Manufacturer Description'].str.upper() == manufacturer1) |
+            (self.df['Manufacturer Description'].str.upper() == manufacturer2)
+        ]
+        
+        # Filter out discontinued items
+        filtered_df = self.filter_discontinued_items(filtered_df)
+        
+        # Get all week columns
+        week_pattern = re.compile(r'^\\d{4}\\s+PD\\s+\\d{2}\\s+WK\\s+\\d+\\s+\\(\\d{2}\\)$')
+        week_cols = [col for col in filtered_df.columns if week_pattern.match(col)]
+        
+        # Create weekly data
+        weekly_data = []
+        
+        for _, row in filtered_df.iterrows():
+            item = row['UPC+Item Description']
+            manufacturer = row['Manufacturer Description']
+            size_oz = row['Size_OZ']
+            
+            for week in week_cols:
+                try:
+                    sales = float(str(row[week]).replace(',', ''))
+                    if sales > 0:  # Only include weeks with sales
+                        weekly_data.append({
+                            'Item': item,
+                            'Manufacturer': manufacturer,
+                            'Size_OZ': size_oz,
+                            'Week': week,
+                            'Units': sales
+                        })
+                except (ValueError, TypeError):
+                    continue
+        
+        # Convert to DataFrame
         weekly_df = pd.DataFrame(weekly_data)
         
-        # Filter out zero units and calculate price per unit
-        self.price_data = weekly_df[weekly_df['Data_Type'] == 'Movement'].copy()
-        self.price_data = self.price_data[self.price_data['Units'] > 0]
+        # Calculate average price per unit
+        weekly_df['Avg_Price'] = weekly_df.groupby(['Item', 'Week'])['Units'].transform('mean')
         
-        # Filter outliers (> 1.5 standard deviations)
-        self.price_data = self.filter_outliers(self.price_data, 'Units')
-        self.price_data = self.filter_outliers(self.price_data, 'Avg_Price')
-        
-        print(f"Data points after filtering: {len(self.price_data)}")
-        return self.price_data
+        return weekly_df
     
     def filter_outliers(self, df, column):
         """Filter outliers using IQR method"""
@@ -265,72 +374,113 @@ class PricingAnalyzer:
         upper_bound = Q3 + 1.5 * IQR
         return df[(df[column] >= lower_bound) & (df[column] <= upper_bound)]
     
-    def find_like_items(self, similarity_threshold=0.6):
+    def find_like_items(self, similarity_threshold=0.8):
         """
-        Find like items between manufacturers using Jaro-Winkler similarity and size matching.
+        Find like items by first matching at individual item level, then grouping by RBP.
+        If any items between two RBP groups match with high similarity, the entire groups are considered matched.
         
         Args:
             similarity_threshold: Minimum similarity score (0-1) for item matching
         """
         print("Finding like items using string similarity and size matching...")
         
-        # Get unique items by manufacturer
-        mfg1_items = self.price_data[self.price_data['Manufacturer'].str.upper() == self.manufacturer1]['Item'].unique()
-        mfg2_items = self.price_data[self.price_data['Manufacturer'].str.upper() == self.manufacturer2]['Item'].unique()
+        # Debug: Print available columns in both DataFrames
+        print("Original DataFrame columns:", self.df.columns.tolist())
+        print("Price data columns:", self.price_data.columns.tolist())
         
-        print(f"{self.manufacturer1} items: {len(mfg1_items)}")
-        print(f"{self.manufacturer2} items: {len(mfg2_items)}")
+        # Get items by manufacturer
+        mfg1_data = self.df[self.df['Manufacturer Description'].str.upper() == self.manufacturer1]
+        mfg2_data = self.df[self.df['Manufacturer Description'].str.upper() == self.manufacturer2]
         
-        # Get size data for each item
-        mfg1_sizes = {}
-        mfg2_sizes = {}
+        # Create dictionaries to store RBP group information
+        mfg1_rbp_groups = {}  # RBP code -> {items: [], sizes: [], description: str}
+        mfg2_rbp_groups = {}
         
-        for item in mfg1_items:
-            item_data = self.price_data[self.price_data['Item'] == item]
-            if len(item_data) > 0:
-                mfg1_sizes[item] = item_data['Size_OZ'].iloc[0]
+        # Group items by RBP for manufacturer 1
+        for _, row in mfg1_data.drop_duplicates(['Consolidated_Item', 'Size_OZ']).iterrows():
+            rbp_code = row['Rules Based Pricing Code']
+            if pd.notna(rbp_code):
+                if rbp_code not in mfg1_rbp_groups:
+                    mfg1_rbp_groups[rbp_code] = {
+                        'items': [],
+                        'sizes': set(),
+                        'description': row['Rules Based Pricing Description']
+                    }
+                mfg1_rbp_groups[rbp_code]['items'].append(row['Consolidated_Item'])
+                mfg1_rbp_groups[rbp_code]['sizes'].add(row['Size_OZ'])
         
-        for item in mfg2_items:
-            item_data = self.price_data[self.price_data['Item'] == item]
-            if len(item_data) > 0:
-                mfg2_sizes[item] = item_data['Size_OZ'].iloc[0]
+        # Group items by RBP for manufacturer 2
+        for _, row in mfg2_data.drop_duplicates(['Consolidated_Item', 'Size_OZ']).iterrows():
+            rbp_code = row['Rules Based Pricing Code']
+            if pd.notna(rbp_code):
+                if rbp_code not in mfg2_rbp_groups:
+                    mfg2_rbp_groups[rbp_code] = {
+                        'items': [],
+                        'sizes': set(),
+                        'description': row['Rules Based Pricing Description']
+                    }
+                mfg2_rbp_groups[rbp_code]['items'].append(row['Consolidated_Item'])
+                mfg2_rbp_groups[rbp_code]['sizes'].add(row['Size_OZ'])
         
-        # Find matches using similarity and size
+        print(f"{self.manufacturer1} RBP groups: {len(mfg1_rbp_groups)}")
+        print(f"{self.manufacturer2} RBP groups: {len(mfg2_rbp_groups)}")
+        
+        # Find matches between RBP groups based on item-level similarity
         matches = []
         total_comparisons = 0
         
-        for mfg1_item, mfg1_size in mfg1_sizes.items():
-            for mfg2_item, mfg2_size in mfg2_sizes.items():
+        for rbp1_code, rbp1_info in mfg1_rbp_groups.items():
+            for rbp2_code, rbp2_info in mfg2_rbp_groups.items():
                 total_comparisons += 1
                 
-                # Size must match exactly
-                if mfg1_size != mfg2_size:
+                # Find any matching sizes between the groups
+                common_sizes = rbp1_info['sizes'].intersection(rbp2_info['sizes'])
+                if not common_sizes:
                     continue
                 
-                # Calculate string similarity
-                similarity = jaro_winkler_similarity(mfg1_item, mfg2_item)
+                # Compare all items between the groups
+                best_similarity = 0
+                best_item1 = None
+                best_item2 = None
                 
-                # Check if similarity meets threshold
-                if similarity >= similarity_threshold:
-                    matches.append({
-                        'Size_OZ': mfg1_size,
-                        'Mfg1_Item': mfg1_item,
-                        'Mfg2_Item': mfg2_item,
-                        'Similarity_Score': similarity
-                    })
+                for item1 in rbp1_info['items']:
+                    for item2 in rbp2_info['items']:
+                        # Calculate string similarity
+                        similarity = jaro_winkler_similarity(str(item1), str(item2))
+                        if similarity > best_similarity:
+                            best_similarity = similarity
+                            best_item1 = item1
+                            best_item2 = item2
+                
+                # If any items match above threshold, consider the RBP groups matched
+                if best_similarity >= similarity_threshold:
+                    for size in common_sizes:
+                        matches.append({
+                            'Size_OZ': size,
+                            'Mfg1_RBP_Code': rbp1_code,
+                            'Mfg2_RBP_Code': rbp2_code,
+                            'Mfg1_RBP_Desc': rbp1_info['description'],
+                            'Mfg2_RBP_Desc': rbp2_info['description'],
+                            'Best_Match_Item1': best_item1,
+                            'Best_Match_Item2': best_item2,
+                            'Similarity_Score': best_similarity
+                        })
         
         # Sort matches by similarity score (highest first)
         matches.sort(key=lambda x: x['Similarity_Score'], reverse=True)
         
-        print(f"Total item comparisons: {total_comparisons}")
+        print(f"Total RBP group comparisons: {total_comparisons}")
         print(f"Matches found with similarity ≥ {similarity_threshold}: {len(matches)}")
         
         if matches:
             print(f"Top 3 matches:")
             for i, match in enumerate(matches[:3]):
                 print(f"  {i+1}. Similarity: {match['Similarity_Score']:.3f}")
-                print(f"     {self.manufacturer1}: {match['Mfg1_Item']}")
-                print(f"     {self.manufacturer2}: {match['Mfg2_Item']}")
+                print(f"     {self.manufacturer1} RBP: {match['Mfg1_RBP_Desc']}")
+                print(f"     {self.manufacturer2} RBP: {match['Mfg2_RBP_Desc']}")
+                print(f"     Best matching items:")
+                print(f"       {self.manufacturer1}: {match['Best_Match_Item1']}")
+                print(f"       {self.manufacturer2}: {match['Best_Match_Item2']}")
                 print(f"     Size: {match['Size_OZ']} OZ")
         
         return matches
@@ -403,181 +553,127 @@ class PricingAnalyzer:
             return 1.0  # Return high p-value if calculation fails
     
     def build_item_model(self, item_data, item_name):
-        """Build regression model for a specific item with statistical validation"""
-        if len(item_data) < 5:
-            return None, None, None, "Insufficient data"
-        
-        X = item_data[['Avg_Price']].values
+        """
+        Build and evaluate regression models for an RBP group.
+        Returns a dictionary with model results if successful, None if not.
+        """
+        if len(item_data) < 10:
+            print(f"Insufficient data points for {item_name}")
+            return None
+            
+        X = item_data['Avg_Price'].values.reshape(-1, 1)
         y = item_data['Units'].values
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Try different model types
+        models = {
+            'Linear': LinearRegression(),
+            'Ridge': Ridge(alpha=1.0),
+            'Log-Linear': LinearRegression(),  # Will transform data
+            'Polynomial': Pipeline([
+                ('poly', PolynomialFeatures(degree=2)),
+                ('linear', LinearRegression())
+            ]),
+            'Exponential': LinearRegression(),  # Will transform data
+            'Power': LinearRegression()  # Will transform data
+        }
         
-        models = {}
-        results = {}
+        best_model = None
+        best_r2 = 0
+        best_p_value = 1
+        best_type = None
+        best_X = None
+        best_y = None
         
-        # 1. Linear Regression
-        try:
-            lr = LinearRegression()
-            lr.fit(X_train, y_train)
-            y_pred_lr = lr.predict(X_test)
-            r2_lr = r2_score(y_test, y_pred_lr)
-            p_value_lr = self.calculate_p_value(X_train, y_train, lr)
+        for model_type, model in models.items():
+            try:
+                # Transform data based on model type
+                if model_type == 'Log-Linear':
+                    model_X = np.log(X)
+                    model_y = y
+                elif model_type == 'Exponential':
+                    model_X = X
+                    model_y = np.log(y + 1)  # Add 1 to handle zeros
+                elif model_type == 'Power':
+                    model_X = np.log(X)
+                    model_y = np.log(y + 1)  # Add 1 to handle zeros
+                else:
+                    model_X = X
+                    model_y = y
+                
+                # Fit model
+                model.fit(model_X, model_y)
+                
+                # Calculate R² and p-value
+                r2 = model.score(model_X, model_y)
+                p_value = self.calculate_p_value(model_X, model_y, model)
+                
+                # Update best model if this one is better
+                if r2 > best_r2 and r2 >= 0.25 and p_value <= 0.05:
+                    best_model = model
+                    best_r2 = r2
+                    best_p_value = p_value
+                    best_type = model_type
+                    best_X = model_X
+                    best_y = model_y
             
-            models['Linear'] = lr
-            results['Linear'] = {
-                'R2': r2_lr,
-                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_lr)),
-                'Coefficient': lr.coef_[0],
-                'Intercept': lr.intercept_,
-                'P_Value': p_value_lr,
-                'Type': 'Linear'
-            }
-        except Exception:
-            pass
+            except Exception as e:
+                print(f"Error fitting {model_type} model: {str(e)}")
+                continue
         
-        # 2. Ridge Regression
-        try:
-            ridge = Ridge(alpha=1.0)
-            ridge.fit(X_train, y_train)
-            y_pred_ridge = ridge.predict(X_test)
-            r2_ridge = r2_score(y_test, y_pred_ridge)
-            p_value_ridge = self.calculate_p_value(X_train, y_train, ridge)
+        if best_model is None:
+            print(f"Model quality insufficient (R² < 0.25 or p > 0.05). Best R²: {best_r2:.4f}, Best p-value: {best_p_value:.4f}")
+            return None
             
-            models['Ridge'] = ridge
-            results['Ridge'] = {
-                'R2': r2_ridge,
-                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_ridge)),
-                'Coefficient': ridge.coef_[0],
-                'Intercept': ridge.intercept_,
-                'P_Value': p_value_ridge,
-                'Type': 'Linear'
-            }
-        except Exception:
-            pass
+        # Calculate current average price and predict optimal price
+        current_price = item_data['Avg_Price'].mean()
+        price_range = np.linspace(max(0.29, current_price * 0.7), current_price * 1.3, 20)
+        valid_prices = self.get_valid_prices(price_range.min(), price_range.max())
         
-        # 3. Log-Linear Model (log of units vs price)
-        try:
-            # Ensure positive values for log transformation
-            y_train_log = np.log(np.maximum(y_train, 0.1))
-            y_test_log = np.log(np.maximum(y_test, 0.1))
-            
-            lr_log = LinearRegression()
-            lr_log.fit(X_train, y_train_log)
-            y_pred_log = lr_log.predict(X_test)
-            
-            # Convert back to original scale for R² calculation
-            y_pred_original = np.exp(y_pred_log)
-            r2_log = r2_score(y_test, y_pred_original)
-            p_value_log = self.calculate_p_value(X_train, y_train_log, lr_log)
-            
-            models['Log_Linear'] = lr_log
-            results['Log_Linear'] = {
-                'R2': r2_log,
-                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_original)),
-                'Coefficient': lr_log.coef_[0],
-                'Intercept': lr_log.intercept_,
-                'P_Value': p_value_log,
-                'Type': 'Log_Linear'
-            }
-        except Exception:
-            pass
+        # Transform prices based on best model type
+        if best_type == 'Log-Linear':
+            model_prices = np.log(valid_prices).reshape(-1, 1)
+            predictions = best_model.predict(model_prices)
+        elif best_type == 'Exponential':
+            model_prices = np.array(valid_prices).reshape(-1, 1)
+            predictions = np.exp(best_model.predict(model_prices)) - 1
+        elif best_type == 'Power':
+            model_prices = np.log(valid_prices).reshape(-1, 1)
+            predictions = np.exp(best_model.predict(model_prices)) - 1
+        elif best_type == 'Polynomial':
+            model_prices = best_model.named_steps['poly'].transform(np.array(valid_prices).reshape(-1, 1))
+            predictions = best_model.predict(model_prices)
+        else:
+            model_prices = np.array(valid_prices).reshape(-1, 1)
+            predictions = best_model.predict(model_prices)
         
-        # 4. Polynomial Model (Quadratic)
-        try:
-            # Create polynomial features
-            X_train_poly = np.column_stack([X_train, X_train**2])
-            X_test_poly = np.column_stack([X_test, X_test**2])
-            
-            poly_model = LinearRegression()
-            poly_model.fit(X_train_poly, y_train)
-            y_pred_poly = poly_model.predict(X_test_poly)
-            r2_poly = r2_score(y_test, y_pred_poly)
-            p_value_poly = self.calculate_p_value(X_train_poly, y_train, poly_model)
-            
-            models['Polynomial'] = poly_model
-            results['Polynomial'] = {
-                'R2': r2_poly,
-                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_poly)),
-                'Coefficient': poly_model.coef_[0],
-                'Intercept': poly_model.intercept_,
-                'P_Value': p_value_poly,
-                'Type': 'Polynomial'
-            }
-        except Exception:
-            pass
+        # Find optimal price
+        revenues = np.array(valid_prices) * predictions
+        optimal_idx = np.argmax(revenues)
+        optimal_price = valid_prices[optimal_idx]
+        optimal_volume = predictions[optimal_idx]
+        optimal_revenue = revenues[optimal_idx]
         
-        # 5. Exponential Model (log of price vs units)
-        try:
-            # Ensure positive prices for log transformation
-            X_train_log = np.log(np.maximum(X_train, 0.1))
-            X_test_log = np.log(np.maximum(X_test, 0.1))
-            
-            exp_model = LinearRegression()
-            exp_model.fit(X_train_log, y_train)
-            y_pred_exp = exp_model.predict(X_test_log)
-            r2_exp = r2_score(y_test, y_pred_exp)
-            p_value_exp = self.calculate_p_value(X_train_log, y_train, exp_model)
-            
-            models['Exponential'] = exp_model
-            results['Exponential'] = {
-                'R2': r2_exp,
-                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_exp)),
-                'Coefficient': exp_model.coef_[0],
-                'Intercept': exp_model.intercept_,
-                'P_Value': p_value_exp,
-                'Type': 'Exponential'
-            }
-        except Exception:
-            pass
+        # Print results
+        print(f"{item_name} Model Status: Valid {best_type} model")
+        print(f"{item_name} Recommendation:")
+        print(f"  Current Price: ${current_price:.2f}")
+        print(f"  Recommended Price: ${optimal_price:.2f}")
+        print(f"  Predicted Volume: {optimal_volume:.1f}")
+        print(f"  Predicted Revenue: ${optimal_revenue:.2f}")
+        print(f"  Model R²: {best_r2:.4f}")
+        print(f"  Model P-Value: {best_p_value:.4f}")
         
-        # 6. Power Model (log-log transformation)
-        try:
-            # Ensure positive values for log transformation
-            X_train_log = np.log(np.maximum(X_train, 0.1))
-            X_test_log = np.log(np.maximum(X_test, 0.1))
-            y_train_log = np.log(np.maximum(y_train, 0.1))
-            y_test_log = np.log(np.maximum(y_test, 0.1))
-            
-            power_model = LinearRegression()
-            power_model.fit(X_train_log, y_train_log)
-            y_pred_log_power = power_model.predict(X_test_log)
-            
-            # Convert back to original scale for R² calculation
-            y_pred_power = np.exp(y_pred_log_power)
-            r2_power = r2_score(y_test, y_pred_power)
-            p_value_power = self.calculate_p_value(X_train_log, y_train_log, power_model)
-            
-            models['Power'] = power_model
-            results['Power'] = {
-                'R2': r2_power,
-                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred_power)),
-                'Coefficient': power_model.coef_[0],
-                'Intercept': power_model.intercept_,
-                'P_Value': p_value_power,
-                'Type': 'Power'
-            }
-        except Exception:
-            pass
-        
-        if not results:
-            return None, None, None, "No valid models"
-        
-        # Find best model with validation
-        valid_models = {}
-        for model_name, metrics in results.items():
-            if metrics['R2'] >= 0.25 and metrics['P_Value'] <= 0.05:
-                valid_models[model_name] = metrics
-        
-        if not valid_models:
-            return None, None, None, f"Model quality insufficient (R² < 0.25 or p > 0.05). Best R²: {max([m['R2'] for m in results.values()]):.4f}, Best p-value: {min([m['P_Value'] for m in results.values()]):.4f}"
-        
-        # Find best valid model (highest R²)
-        best_model_name = max(valid_models.items(), key=lambda x: x[1]['R2'])[0]
-        best_model = models[best_model_name]
-        best_results = valid_models[best_model_name]
-        
-        return best_model, best_results, best_model_name, f"Valid {best_results['Type']} model"
+        return {
+            'current_price': current_price,
+            'recommended_price': optimal_price,
+            'predicted_volume': optimal_volume,
+            'predicted_revenue': optimal_revenue,
+            'r2': best_r2,
+            'p_value': best_p_value,
+            'model_type': best_type,
+            'model': best_model,  # Include the trained model
+            'baseline_volume': item_data['Units'].mean()  # Include baseline volume
+        }
     
     def predict_optimal_price(self, model, model_name, price_range, item_name):
         """Predict optimal price for revenue maximization"""
@@ -631,183 +727,298 @@ class PricingAnalyzer:
         
         return optimal_price, optimal_volume, max_revenue
     
-    def analyze_pair(self, mfg1_item, mfg2_item, size, similarity_score):
-        """Analyze a specific item pair"""
-        print(f"\n=== ANALYZING PAIR: {size} OZ ===")
-        print(f"{self.manufacturer1}: {mfg1_item}")
-        print(f"{self.manufacturer2}: {mfg2_item}")
+    def optimize_joint_prices(self, mfg1_data, mfg2_data, mfg1_model, mfg2_model, max_volume_loss_pct=10, price_step=0.10):
+        """
+        Find optimal prices that maximize combined revenue while limiting volume loss.
         
-        # Get data for each item
-        mfg1_data = self.price_data[(self.price_data['Item'] == mfg1_item) & 
-                                   (self.price_data['Manufacturer'].str.upper() == self.manufacturer1)]
-        mfg2_data = self.price_data[(self.price_data['Item'] == mfg2_item) & 
-                                   (self.price_data['Manufacturer'].str.upper() == self.manufacturer2)]
+        Args:
+            mfg1_data: DataFrame with first manufacturer's data
+            mfg2_data: DataFrame with second manufacturer's data
+            mfg1_model: Dict containing first manufacturer's model info
+            mfg2_model: Dict containing second manufacturer's model info
+            max_volume_loss_pct: Maximum allowed volume loss as a percentage
+            price_step: Step size for price grid search
+            
+        Returns:
+            Dictionary with optimal prices and predicted metrics
+        """
+        if not mfg1_model or not mfg2_model:
+            return None
+            
+        # Get current metrics
+        current_price1 = mfg1_model['current_price']
+        current_price2 = mfg2_model['current_price']
+        
+        # Get baseline volumes from model info
+        baseline_volume1 = mfg1_model['baseline_volume']
+        baseline_volume2 = mfg2_model['baseline_volume']
+        total_baseline_volume = baseline_volume1 + baseline_volume2
+        min_allowed_volume = total_baseline_volume * (1 - max_volume_loss_pct/100)
+        
+        # Calculate current revenues
+        current_revenue1 = baseline_volume1 * current_price1
+        current_revenue2 = baseline_volume2 * current_price2
+        
+        # Generate price ranges (±30% from current, ending in 9)
+        def get_price_range(current_price):
+            min_price = max(0.29, current_price * 0.7)
+            max_price = current_price * 1.3
+            prices = []
+            price = min_price
+            while price <= max_price:
+                rounded = self.round_to_valid_price(price)
+                if rounded not in prices:
+                    prices.append(rounded)
+                price += price_step
+            return sorted(prices)
+        
+        price_range1 = get_price_range(current_price1)
+        price_range2 = get_price_range(current_price2)
+        
+        # Try all price combinations
+        best_result = {
+            'combined_revenue': current_revenue1 + current_revenue2,
+            'price1': current_price1,
+            'price2': current_price2,
+            'volume1': baseline_volume1,
+            'volume2': baseline_volume2,
+            'revenue1': current_revenue1,
+            'revenue2': current_revenue2,
+            'total_volume': total_baseline_volume,
+            'volume_change_pct': 0.0
+        }
+        
+        for price1 in price_range1:
+            for price2 in price_range2:
+                # Predict volumes at these prices
+                try:
+                    if mfg1_model['model_type'] == 'Log-Linear':
+                        volume1 = np.exp(mfg1_model['model'].predict([[np.log(price1)]]))
+                    elif mfg1_model['model_type'] == 'Exponential':
+                        volume1 = np.exp(mfg1_model['model'].predict([[price1]])) - 1
+                    elif mfg1_model['model_type'] == 'Power':
+                        volume1 = np.exp(mfg1_model['model'].predict([[np.log(price1)]])) - 1
+                    else:
+                        volume1 = mfg1_model['model'].predict([[price1]])
+                        
+                    if mfg2_model['model_type'] == 'Log-Linear':
+                        volume2 = np.exp(mfg2_model['model'].predict([[np.log(price2)]]))
+                    elif mfg2_model['model_type'] == 'Exponential':
+                        volume2 = np.exp(mfg2_model['model'].predict([[price2]])) - 1
+                    elif mfg2_model['model_type'] == 'Power':
+                        volume2 = np.exp(mfg2_model['model'].predict([[np.log(price2)]])) - 1
+                    else:
+                        volume2 = mfg2_model['model'].predict([[price2]])
+                    
+                    # Ensure volumes are positive
+                    volume1 = max(0, volume1)
+                    volume2 = max(0, volume2)
+                    
+                    # Check if total volume meets minimum requirement
+                    total_volume = volume1 + volume2
+                    if total_volume < min_allowed_volume:
+                        continue
+                    
+                    # Calculate revenues
+                    revenue1 = volume1 * price1
+                    revenue2 = volume2 * price2
+                    combined_revenue = revenue1 + revenue2
+                    
+                    # Update best result if this combination is better
+                    if combined_revenue > best_result['combined_revenue']:
+                        best_result = {
+                            'combined_revenue': combined_revenue,
+                            'price1': price1,
+                            'price2': price2,
+                            'volume1': volume1,
+                            'volume2': volume2,
+                            'revenue1': revenue1,
+                            'revenue2': revenue2,
+                            'total_volume': total_volume,
+                            'volume_change_pct': ((total_volume - total_baseline_volume) / total_baseline_volume) * 100
+                        }
+                
+                except Exception as e:
+                    continue
+        
+        return best_result
+    
+    def analyze_pair(self, match):
+        """
+        Analyze a matched pair of RBP groups.
+        
+        Args:
+            match: Dictionary containing RBP group match information
+        """
+        print(f"\n=== ANALYZING PAIR: {match['Size_OZ']} OZ ===")
+        print(f"{self.manufacturer1} RBP: {match['Mfg1_RBP_Desc']}")
+        print(f"{self.manufacturer2} RBP: {match['Mfg2_RBP_Desc']}")
+        
+        # Get data for each RBP group using the best matching items
+        mfg1_data = self.price_data[
+            (self.price_data['Manufacturer'].str.upper() == self.manufacturer1) &
+            (self.price_data['Item'] == match['Best_Match_Item1']) &
+            (self.price_data['Size_OZ'] == match['Size_OZ'])
+        ]
+        
+        mfg2_data = self.price_data[
+            (self.price_data['Manufacturer'].str.upper() == self.manufacturer2) &
+            (self.price_data['Item'] == match['Best_Match_Item2']) &
+            (self.price_data['Size_OZ'] == match['Size_OZ'])
+        ]
         
         print(f"{self.manufacturer1} data points: {len(mfg1_data)}")
         print(f"{self.manufacturer2} data points: {len(mfg2_data)}")
+        print()
         
-        # Build models for each item
-        mfg1_model, mfg1_results, mfg1_model_name, mfg1_status = self.build_item_model(mfg1_data, mfg1_item)
-        mfg2_model, mfg2_results, mfg2_model_name, mfg2_status = self.build_item_model(mfg2_data, mfg2_item)
+        if len(mfg1_data) < 10:
+            print(f"Insufficient data points for {match['Mfg1_RBP_Desc']}")
+            mfg1_model = None
+        else:
+            mfg1_model = self.build_item_model(mfg1_data, match['Mfg1_RBP_Desc'])
+            
+        if len(mfg2_data) < 10:
+            print(f"Insufficient data points for {match['Mfg2_RBP_Desc']}")
+            mfg2_model = None
+        else:
+            mfg2_model = self.build_item_model(mfg2_data, match['Mfg2_RBP_Desc'])
         
-        # Define price ranges based on current prices
-        mfg1_current_avg = mfg1_data['Avg_Price'].mean() if len(mfg1_data) > 0 else 1.15
-        mfg2_current_avg = mfg2_data['Avg_Price'].mean() if len(mfg2_data) > 0 else 1.50
+        # If we have valid models for both items, perform joint optimization
+        if mfg1_model and mfg2_model:
+            print("\nJoint Optimization Results:")
+            joint_result = self.optimize_joint_prices(mfg1_data, mfg2_data, mfg1_model, mfg2_model)
+            
+            if joint_result:
+                current_combined = joint_result['revenue1'] + joint_result['revenue2']
+                revenue_increase = ((joint_result['combined_revenue'] - current_combined) / current_combined) * 100
+                
+                print(f"Current Combined Revenue: ${current_combined:.2f}")
+                print(f"Optimal Combined Revenue: ${joint_result['combined_revenue']:.2f}")
+                print(f"Revenue Increase: {revenue_increase:.1f}%")
+                print(f"Volume Change: {joint_result['volume_change_pct']:.1f}%")
+                print(f"\nOptimal Prices:")
+                print(f"  {match['Mfg1_RBP_Desc']}: ${joint_result['price1']:.2f} (current: ${mfg1_model['current_price']:.2f})")
+                print(f"  {match['Mfg2_RBP_Desc']}: ${joint_result['price2']:.2f} (current: ${mfg2_model['current_price']:.2f})")
+                print(f"\nPredicted Volumes:")
+                print(f"  {match['Mfg1_RBP_Desc']}: {joint_result['volume1']:.1f}")
+                print(f"  {match['Mfg2_RBP_Desc']}: {joint_result['volume2']:.1f}")
+                print(f"\nPredicted Revenues:")
+                print(f"  {match['Mfg1_RBP_Desc']}: ${joint_result['revenue1']:.2f}")
+                print(f"  {match['Mfg2_RBP_Desc']}: ${joint_result['revenue2']:.2f}")
         
-        mfg1_price_range = np.linspace(max(0.29, mfg1_current_avg * 0.7), mfg1_current_avg * 1.3, 20)
-        mfg2_price_range = np.linspace(max(0.29, mfg2_current_avg * 0.7), mfg2_current_avg * 1.3, 20)
-        
-        # Get valid prices ending in 9
-        mfg1_valid_prices = self.get_valid_prices(mfg1_price_range.min(), mfg1_price_range.max())
-        mfg2_valid_prices = self.get_valid_prices(mfg2_price_range.min(), mfg2_price_range.max())
-        
-        mfg1_recommendation = None
-        mfg2_recommendation = None
-        
-        # Generate recommendations
-        if mfg1_model is not None:
-            mfg1_optimal_price, mfg1_optimal_volume, mfg1_optimal_revenue = self.predict_optimal_price(
-                mfg1_model, mfg1_model_name, mfg1_valid_prices, mfg1_item
-            )
-            if mfg1_optimal_price is not None:
-                mfg1_recommendation = {
-                    'Optimal_Price': self.round_to_valid_price(mfg1_optimal_price),
-                    'Predicted_Volume': mfg1_optimal_volume,
-                    'Predicted_Revenue': mfg1_optimal_revenue,
-                    'Model_R2': mfg1_results['R2'],
-                    'Model_P_Value': mfg1_results['P_Value'],
-                    'Current_Avg_Price': mfg1_current_avg
-                }
-        
-        if mfg2_model is not None:
-            mfg2_optimal_price, mfg2_optimal_volume, mfg2_optimal_revenue = self.predict_optimal_price(
-                mfg2_model, mfg2_model_name, mfg2_valid_prices, mfg2_item
-            )
-            if mfg2_optimal_price is not None:
-                mfg2_recommendation = {
-                    'Optimal_Price': self.round_to_valid_price(mfg2_optimal_price),
-                    'Predicted_Volume': mfg2_optimal_volume,
-                    'Predicted_Revenue': mfg2_optimal_revenue,
-                    'Model_R2': mfg2_results['R2'],
-                    'Model_P_Value': mfg2_results['P_Value'],
-                    'Current_Avg_Price': mfg2_current_avg
-                }
-        
-        # Create recommendation entry
-        recommendation = {
-            'Size_OZ': size,
-            'Mfg1_Item': mfg1_item,
-            'Mfg2_Item': mfg2_item,
-            'Similarity_Score': similarity_score,
-            'Mfg1_Current_Price': mfg1_current_avg,
-            'Mfg2_Current_Price': mfg2_current_avg,
-            'Mfg1_Recommended_Price': mfg1_recommendation['Optimal_Price'] if mfg1_recommendation else None,
-            'Mfg2_Recommended_Price': mfg2_recommendation['Optimal_Price'] if mfg2_recommendation else None,
-            'Mfg1_Predicted_Volume': mfg1_recommendation['Predicted_Volume'] if mfg1_recommendation else None,
-            'Mfg2_Predicted_Volume': mfg2_recommendation['Predicted_Volume'] if mfg2_recommendation else None,
-            'Mfg1_Predicted_Revenue': mfg1_recommendation['Predicted_Revenue'] if mfg1_recommendation else None,
-            'Mfg2_Predicted_Revenue': mfg2_recommendation['Predicted_Revenue'] if mfg2_recommendation else None,
-            'Mfg1_Model_R2': mfg1_recommendation['Model_R2'] if mfg1_recommendation else None,
-            'Mfg2_Model_R2': mfg2_recommendation['Model_R2'] if mfg2_recommendation else None,
-            'Mfg1_Model_P_Value': mfg1_recommendation['Model_P_Value'] if mfg1_recommendation else None,
-            'Mfg2_Model_P_Value': mfg2_recommendation['Model_P_Value'] if mfg2_recommendation else None,
-            'Mfg1_Model_Status': mfg1_status,
-            'Mfg2_Model_Status': mfg2_status,
-            'Price_Gap': (mfg2_recommendation['Optimal_Price'] - mfg1_recommendation['Optimal_Price']) if (mfg2_recommendation and mfg1_recommendation) else None
+        # Store results
+        result = {
+            'Size_OZ': match['Size_OZ'],
+            'Mfg1_RBP': match['Mfg1_RBP_Desc'],
+            'Mfg2_RBP': match['Mfg2_RBP_Desc'],
+            'Best_Match_Item1': match['Best_Match_Item1'],
+            'Best_Match_Item2': match['Best_Match_Item2'],
+            'Similarity_Score': match['Similarity_Score']
         }
         
-        # Print recommendations
-        print(f"\n{self.manufacturer1} Model Status: {mfg1_status}")
-        if mfg1_recommendation:
-            print(f"{self.manufacturer1} Recommendation:")
-            print(f"  Current Price: ${mfg1_current_avg:.2f}")
-            print(f"  Recommended Price: ${mfg1_recommendation['Optimal_Price']:.2f}")
-            print(f"  Predicted Volume: {mfg1_recommendation['Predicted_Volume']:.1f}")
-            print(f"  Predicted Revenue: ${mfg1_recommendation['Predicted_Revenue']:.2f}")
-            print(f"  Model R²: {mfg1_recommendation['Model_R2']:.4f}")
-            print(f"  Model P-Value: {mfg1_recommendation['Model_P_Value']:.4f}")
-        else:
-            print(f"{self.manufacturer1}: No valid recommendation - {mfg1_status}")
+        # Add model results if available
+        if mfg1_model:
+            result.update({
+                'Mfg1_Current_Price': mfg1_model['current_price'],
+                'Mfg1_Individual_Recommended_Price': mfg1_model['recommended_price'],
+                'Mfg1_Individual_Predicted_Volume': mfg1_model['predicted_volume'],
+                'Mfg1_Individual_Predicted_Revenue': mfg1_model['predicted_revenue'],
+                'Mfg1_Model_R2': mfg1_model['r2'],
+                'Mfg1_Model_Type': mfg1_model['model_type']
+            })
         
-        print(f"{self.manufacturer2} Model Status: {mfg2_status}")
-        if mfg2_recommendation:
-            print(f"{self.manufacturer2} Recommendation:")
-            print(f"  Current Price: ${mfg2_current_avg:.2f}")
-            print(f"  Recommended Price: ${mfg2_recommendation['Optimal_Price']:.2f}")
-            print(f"  Predicted Volume: {mfg2_recommendation['Predicted_Volume']:.1f}")
-            print(f"  Predicted Revenue: ${mfg2_recommendation['Predicted_Revenue']:.2f}")
-            print(f"  Model R²: {mfg2_recommendation['Model_R2']:.4f}")
-            print(f"  Model P-Value: {mfg2_recommendation['Model_P_Value']:.4f}")
-        else:
-            print(f"{self.manufacturer2}: No valid recommendation - {mfg2_status}")
+        if mfg2_model:
+            result.update({
+                'Mfg2_Current_Price': mfg2_model['current_price'],
+                'Mfg2_Individual_Recommended_Price': mfg2_model['recommended_price'],
+                'Mfg2_Individual_Predicted_Volume': mfg2_model['predicted_volume'],
+                'Mfg2_Individual_Predicted_Revenue': mfg2_model['predicted_revenue'],
+                'Mfg2_Model_R2': mfg2_model['r2'],
+                'Mfg2_Model_Type': mfg2_model['model_type']
+            })
+            
+        # Add joint optimization results if available
+        if mfg1_model and mfg2_model and joint_result:
+            result.update({
+                'Joint_Optimal_Price1': joint_result['price1'],
+                'Joint_Optimal_Price2': joint_result['price2'],
+                'Joint_Predicted_Volume1': joint_result['volume1'],
+                'Joint_Predicted_Volume2': joint_result['volume2'],
+                'Joint_Predicted_Revenue1': joint_result['revenue1'],
+                'Joint_Predicted_Revenue2': joint_result['revenue2'],
+                'Joint_Combined_Revenue': joint_result['combined_revenue'],
+                'Joint_Volume_Change_Pct': joint_result['volume_change_pct']
+            })
         
-        if mfg1_recommendation and mfg2_recommendation:
-            price_gap = mfg2_recommendation['Optimal_Price'] - mfg1_recommendation['Optimal_Price']
-            print(f"Price Gap: ${price_gap:.2f}")
-        
-        return recommendation
+        return result
     
     def run_analysis(self, manufacturer1='KROGER', manufacturer2=None):
-        """Run the complete pricing analysis"""
-        print("=== PRICING ANALYSIS PACKAGE ===")
+        """
+        Run the pricing analysis and return results.
+        """
+        # Load data and select manufacturers if not already done
+        if not hasattr(self, 'price_data'):
+            self.load_data()
+            self.manufacturer1, self.manufacturer2 = self.select_manufacturers(manufacturer1, manufacturer2)
+            print(f"Analyzing: {self.manufacturer1} vs {self.manufacturer2}")
         
-        # Load data
-        manufacturers = self.load_data()
-        
-        # Select manufacturers
-        self.manufacturer1, self.manufacturer2 = self.select_manufacturers(manufacturer1, manufacturer2)
-        if self.manufacturer2 is None:
-            print("No second manufacturer selected. Exiting.")
-            return None
-        
-        print(f"Analyzing: {self.manufacturer1} vs {self.manufacturer2}")
-        
-        # Prepare data
-        self.prepare_weekly_data(self.manufacturer1, self.manufacturer2)
+        # Prepare weekly data
+        print("Preparing weekly data...")
+        self.price_data = self.prepare_weekly_data(self.manufacturer1, self.manufacturer2)
         
         # Find like items
+        print("Finding like items using string similarity and size matching...")
         matches = self.find_like_items()
         
-        if not matches:
-            print("No matching items found between manufacturers.")
-            return None
+        # Print top matches
+        print("Top 3 matches:")
+        for i, match in enumerate(matches[:3], 1):
+            print(f"  {i}. Similarity: {match['Similarity_Score']:.3f}")
+            print(f"     KROGER RBP: {match['Mfg1_RBP_Desc']}")
+            print(f"     {self.manufacturer2} RBP: {match['Mfg2_RBP_Desc']}")
+            print(f"     Best matching items:")
+            print(f"       KROGER: {match['Best_Match_Item1']}")
+            print(f"       {self.manufacturer2}: {match['Best_Match_Item2']}")
+            print(f"     Size: {match['Size_OZ']} OZ")
         
+        # Analyze each matched pair
         print(f"Found {len(matches)} item pairs to analyze")
-        
-        # Analyze each pair
         recommendations = []
+        
         for match in matches:
-            recommendation = self.analyze_pair(
-                match['Mfg1_Item'], 
-                match['Mfg2_Item'], 
-                match['Size_OZ'],
-                match['Similarity_Score']
-            )
-            recommendations.append(recommendation)
+            recommendation = self.analyze_pair(match)
+            if recommendation:
+                recommendations.append(recommendation)
         
-        # Save results
-        recommendations_df = pd.DataFrame(recommendations)
-        output_file = f'Pricing_Analysis_{self.manufacturer1}_{self.manufacturer2}.csv'
-        recommendations_df.to_csv(output_file, index=False)
+        # Calculate summary statistics
+        valid_recommendations = 0
+        total_price_gap = 0
+        total_revenue_increase = 0
+        total_volume_change = 0
         
-        # Print summary
-        print(f"\n=== SUMMARY ===")
-        print(f"Total item pairs analyzed: {len(recommendations)}")
-        print(f"Results saved to: {output_file}")
+        for recommendation in recommendations:
+            if recommendation.get('Joint_Optimal_Price1') and recommendation.get('Joint_Optimal_Price2'):
+                valid_recommendations += 1
+                total_price_gap += abs(recommendation['Joint_Optimal_Price1'] - recommendation['Joint_Optimal_Price2'])
+                
+                # Calculate revenue increase percentage
+                current_revenue = recommendation['Mfg1_Current_Price'] * recommendation['Mfg1_Individual_Predicted_Volume'] + \
+                                recommendation['Mfg2_Current_Price'] * recommendation['Mfg2_Individual_Predicted_Volume']
+                optimal_revenue = recommendation['Joint_Combined_Revenue']
+                revenue_increase = ((optimal_revenue - current_revenue) / current_revenue) * 100
+                total_revenue_increase += revenue_increase
+                
+                # Add volume change
+                total_volume_change += recommendation['Joint_Volume_Change_Pct']
         
-        valid_recommendations = [r for r in recommendations if r['Mfg1_Recommended_Price'] is not None and r['Mfg2_Recommended_Price'] is not None]
-        print(f"Valid recommendations: {len(valid_recommendations)}")
+        if valid_recommendations > 0:
+            print("\nSummary Statistics:")
+            print(f"Valid Recommendations: {valid_recommendations}")
+            print(f"Average Price Gap: ${total_price_gap/valid_recommendations:.2f}")
+            print(f"Average Revenue Increase: {total_revenue_increase/valid_recommendations:.1f}%")
+            print(f"Average Volume Change: {total_volume_change/valid_recommendations:.1f}%")
         
-        if valid_recommendations:
-            avg_price_gap = np.mean([r['Price_Gap'] for r in valid_recommendations])
-            avg_mfg1_r2 = np.mean([r['Mfg1_Model_R2'] for r in valid_recommendations if r['Mfg1_Model_R2'] is not None])
-            avg_mfg2_r2 = np.mean([r['Mfg2_Model_R2'] for r in valid_recommendations if r['Mfg2_Model_R2'] is not None])
-            
-            print(f"Average Price Gap: ${avg_price_gap:.2f}")
-            print(f"Average {self.manufacturer1} Model R²: {avg_mfg1_r2:.4f}")
-            print(f"Average {self.manufacturer2} Model R²: {avg_mfg2_r2:.4f}")
-        
-        return recommendations_df
+        return recommendations
     
     def calculate_cross_price_elasticity(self, mfg1_data, mfg2_data, mfg1_item, mfg2_item):
         """
@@ -936,10 +1147,38 @@ class PricingAnalyzer:
         
         return results, "Cross-price elasticity calculated", None
 
+    def select_data_file(self):
+        """Let user select the data file to analyze"""
+        # Get list of CSV files in current directory
+        csv_files = [f for f in os.listdir() if f.endswith('.csv')]
+        
+        if not csv_files:
+            print("No CSV files found in current directory.")
+            return None
+            
+        # Print available files
+        print("\nAvailable data files:")
+        for i, file in enumerate(csv_files, 1):
+            print(f"{i}. {file}")
+            
+        while True:
+            try:
+                choice = input("\nSelect a file number (or press Enter for default 'SWater.csv'): ").strip()
+                if not choice:  # Default to SWater.csv
+                    return 'SWater.csv'
+                    
+                choice = int(choice)
+                if 1 <= choice <= len(csv_files):
+                    return csv_files[choice - 1]
+                else:
+                    print("Invalid selection. Please try again.")
+            except ValueError:
+                print("Please enter a valid number.")
+
 # Example usage
 if __name__ == "__main__":
     # Create analyzer instance
-    analyzer = PricingAnalyzer('Data.csv')
+    analyzer = PricingAnalysis()
     
     # Run analysis (user will be prompted to select second manufacturer)
-    results = analyzer.run_analysis(manufacturer1='KROGER', manufacturer2=None) 
+    results = analyzer.run_analysis() 
